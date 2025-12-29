@@ -3,6 +3,7 @@ import Docker from 'dockerode';
 import cron from 'node-cron';
 import fs from 'node:fs';
 import os from 'node:os';
+import path from 'node:path';
 
 // Placeholder Discord bot for the homelab. Real implementations for Docker
 // interactions and command responses should be added later.
@@ -11,6 +12,8 @@ const token = process.env.DISCORD_TOKEN;
 const allowedChannelId = process.env.DISCORD_ALLOWED_CHANNEL_ID;
 const allowedUserId = process.env.DISCORD_ALLOWED_USER_ID;
 const reportChannelId = process.env.DISCORD_REPORT_CHANNEL_ID;
+const stateDir = process.env.BOT_STATE_DIR || path.join(process.cwd(), 'data');
+const lastExternalIpPath = path.join(stateDir, 'last_external_ip.txt');
 
 const HELP_TEXT = `Available commands:
 !help — Show this help message
@@ -25,6 +28,8 @@ if (!token) {
   console.error('DISCORD_TOKEN is required to start the bot.');
   process.exit(1);
 }
+
+ensureStateDir(stateDir);
 
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
@@ -50,12 +55,16 @@ client.on('messageCreate', async (message) => {
       break;
     }
     case '!status': {
-      const statusMessage = await buildStatusReport();
+      const statusReport = await buildStatusReport();
+      const statusMessage = statusReport?.report;
       if (!statusMessage) {
         await message.reply('Unable to read container status right now.');
         return;
       }
       await message.reply(statusMessage);
+      if (statusReport?.externalIpChanged) {
+        await sendExternalIpChangeAlert(client, statusReport.lastExternalIp, statusReport.externalIp);
+      }
       break;
     }
     case '!help': {
@@ -118,8 +127,22 @@ client.on('messageCreate', async (message) => {
 async function buildStatusReport() {
   try {
     const gatewayIp = getGatewayIpAddress();
+    const externalIp = await getExternalIpAddress();
+    const lastExternalIp = await readLastExternalIp(lastExternalIpPath);
+    const externalIpChanged =
+      isValidExternalIp(externalIp) &&
+      isValidExternalIp(lastExternalIp) &&
+      externalIp !== lastExternalIp;
+    if (isValidExternalIp(externalIp) && (externalIpChanged || !isValidExternalIp(lastExternalIp))) {
+      await writeLastExternalIp(lastExternalIpPath, externalIp);
+    }
     const containers = await listRunningContainersWithUptime();
-    return formatStatusReport(gatewayIp, containers);
+    return {
+      report: formatStatusReport(gatewayIp, externalIp, containers),
+      externalIp,
+      lastExternalIp,
+      externalIpChanged,
+    };
   } catch (error) {
     console.error('Failed to build status report.', error);
     return null;
@@ -184,10 +207,11 @@ function formatDuration(milliseconds) {
   return parts.join(' ');
 }
 
-function formatStatusReport(gatewayIp, containers) {
+function formatStatusReport(gatewayIp, externalIp, containers) {
   const header = `📊 **Homelab Status Report**
 
 **Host IP:** \`${gatewayIp}\`
+**External IP:** \`${externalIp}\`
 **Running containers:** \`${containers.length}\`
 
 **Containers**`;
@@ -261,17 +285,33 @@ function scheduleDailyReport(discordClient) {
 }
 
 async function sendScheduledReport(discordClient) {
-  const statusMessage = await buildStatusReport();
+  const statusReport = await buildStatusReport();
+  const statusMessage = statusReport?.report;
   if (!statusMessage) {
     console.error('Skipping scheduled report; status message unavailable.');
     return;
   }
 
+  await sendReportMessage(discordClient, statusMessage);
+  if (statusReport?.externalIpChanged) {
+    await sendExternalIpChangeAlert(discordClient, statusReport.lastExternalIp, statusReport.externalIp);
+  }
+}
+
+async function sendExternalIpChangeAlert(discordClient, previousIp, currentIp) {
+  if (!isValidExternalIp(previousIp) || !isValidExternalIp(currentIp) || previousIp === currentIp) {
+    return;
+  }
+  const alertMessage = `⚠️ **External IP changed**\n\`${previousIp}\` → \`${currentIp}\``;
+  await sendReportMessage(discordClient, alertMessage);
+}
+
+async function sendReportMessage(discordClient, message) {
   if (reportChannelId) {
     try {
       const channel = await discordClient.channels.fetch(reportChannelId);
       if (channel?.isTextBased()) {
-        await channel.send(statusMessage);
+        await channel.send(message);
         return;
       }
       console.error('Report channel is not text-based.');
@@ -283,13 +323,60 @@ async function sendScheduledReport(discordClient) {
   if (allowedUserId) {
     try {
       const user = await discordClient.users.fetch(allowedUserId);
-      await user.send(statusMessage);
+      await user.send(message);
       return;
     } catch (error) {
       console.error('Failed to send report via DM.', error);
     }
   } else {
     console.error('DISCORD_ALLOWED_USER_ID is missing; cannot send report.');
+  }
+}
+
+function isValidExternalIp(ipAddress) {
+  return Boolean(ipAddress) && ipAddress !== 'unknown';
+}
+
+function ensureStateDir(directory) {
+  try {
+    fs.mkdirSync(directory, { recursive: true });
+  } catch (error) {
+    console.error(`Failed to ensure state directory at ${directory}.`, error);
+  }
+}
+
+async function getExternalIpAddress() {
+  try {
+    const response = await fetch('https://api.ipify.org?format=text');
+    if (!response.ok) {
+      throw new Error(`Unexpected response ${response.status}`);
+    }
+    const ipAddress = (await response.text()).trim();
+    return ipAddress || 'unknown';
+  } catch (error) {
+    console.error('Failed to fetch external IP.', error);
+    return 'unknown';
+  }
+}
+
+async function readLastExternalIp(filePath) {
+  try {
+    const saved = await fs.promises.readFile(filePath, 'utf8');
+    const trimmed = saved.trim();
+    return trimmed.length ? trimmed : null;
+  } catch (error) {
+    if (error?.code !== 'ENOENT') {
+      console.error('Failed to read last external IP.', error);
+    }
+    return null;
+  }
+}
+
+async function writeLastExternalIp(filePath, ipAddress) {
+  try {
+    await fs.promises.writeFile(filePath, `${ipAddress}\n`, 'utf8');
+  } catch (error) {
+    console.error('Failed to write last external IP.', error);
   }
 }
 
