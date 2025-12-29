@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-// Placeholder Discord bot for the homelab. Real implementations for Docker
+// Discord bot for the homelab. Real implementations for Docker
 // interactions and command responses should be added later.
 
 const token = process.env.DISCORD_TOKEN;
@@ -38,7 +38,7 @@ const client = new Client({
 });
 
 client.once(Events.ClientReady, () => {
-  console.log(`Placeholder bot logged in as ${client.user?.tag ?? 'unknown user'}`);
+  console.log(`Discord bot logged in as ${client.user?.tag ?? 'unknown user'}`);
   scheduleDailyReport(client);
 });
 
@@ -51,7 +51,7 @@ client.on('messageCreate', async (message) => {
 
   switch (command) {
     case '!ping': {
-      await message.reply('pong (placeholder)');
+      await message.reply('Hello there! 👋');
       break;
     }
     case '!status': {
@@ -382,5 +382,5 @@ async function writeLastExternalIp(filePath, ipAddress) {
 
 client
   .login(token)
-  .then(() => console.log('Placeholder Discord bot login initialized.'))
-  .catch((error) => console.error('Failed to login to Discord (placeholder).', error));
+  .then(() => console.log('Discord bot login initialized.'))
+  .catch((error) => console.error('Failed to login to Discord: ', error));
