@@ -1,6 +1,6 @@
 {
   "name": "discord-homelab-bot",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Placeholder Discord bot for homelab automation.",
   "main": "index.js",
   "type": "module",
