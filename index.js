@@ -24,7 +24,8 @@ const HELP_TEXT = `Available commands:
 !ip — Show current homelab IP
 !restart <container-name> — Restart a Docker container by name
 !stop <container-name> — Stop a Docker container by name
-!start <container-name> — Start a Docker container by name`;
+!start <container-name> — Start a Docker container by name
+!logs <container-name> [lines] — Show recent Docker logs`;
 
 if (!token) {
   console.error('DISCORD_TOKEN is required to start the bot.');
@@ -140,6 +141,16 @@ client.on('messageCreate', async (message) => {
       await message.reply(result);
       break;
     }
+    case '!logs': {
+      const target = args[0];
+      if (!target) {
+        await message.reply('Usage: !logs <container-name> [lines]');
+        return;
+      }
+      const result = await getContainerLogs(target, args[1]);
+      await message.reply(result);
+      break;
+    }
     default: {
       // Ignore unknown commands for now.
     }
@@ -220,6 +231,58 @@ async function startContainer(containerName) {
   } catch (error) {
     console.error(`Failed to start container ${containerName}.`, error);
     return `Unable to start ${containerName} right now.`;
+  }
+}
+
+function normalizeRequestedLogLines(linesArg) {
+  const parsed = Number.parseInt(linesArg, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return { lines: 10, maxEnforced: false };
+  }
+  if (parsed >= 50) {
+    return { lines: 50, maxEnforced: true };
+  }
+  return { lines: parsed, maxEnforced: false };
+}
+
+function truncateForDiscord(message, maxLength) {
+  if (message.length <= maxLength) {
+    return message;
+  }
+  return message.slice(message.length - maxLength);
+}
+
+async function getContainerLogs(containerName, linesArg) {
+  const { lines, maxEnforced } = normalizeRequestedLogLines(linesArg);
+  const container = docker.getContainer(containerName);
+
+  try {
+    await container.inspect();
+  } catch (error) {
+    if (error?.statusCode === 404) {
+      return `Container '${containerName}' not found.`;
+    }
+    console.error(`Failed to inspect container ${containerName}.`, error);
+    return `Unable to fetch logs for ${containerName} right now.`;
+  }
+
+  try {
+    const rawLogs = await container.logs({ stdout: true, stderr: true, tail: lines });
+    const logText = typeof rawLogs === 'string' ? rawLogs : rawLogs?.toString('utf8');
+    if (!logText || !logText.trim()) {
+      return `Container '${containerName}' has no logs.`;
+    }
+
+    const notice = maxEnforced ? 'Showing the most recent 50 log lines (maximum allowed).\n' : '';
+    const codeFenceLength = '```\n\n```'.length;
+    const maxMessageLength = 1900;
+    const availableForLogs = Math.max(0, maxMessageLength - notice.length - codeFenceLength);
+    const trimmedLogs = truncateForDiscord(logText.trimEnd(), availableForLogs);
+
+    return `${notice}\`\`\`\n${trimmedLogs}\n\`\`\``;
+  } catch (error) {
+    console.error(`Failed to fetch logs for ${containerName}.`, error);
+    return `Unable to fetch logs for ${containerName} right now.`;
   }
 }
 
