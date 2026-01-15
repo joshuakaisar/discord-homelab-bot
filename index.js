@@ -37,24 +37,7 @@ const HELP_TEXT = `Available commands:
 /restart <container> — Restart a Docker container by name
 /stop <container> — Stop a Docker container by name
 /start <container> — Start a Docker container by name
-/logs <container> [lines] — Show recent Docker logs (max 50 lines)
-
-Legacy prefixes still work for now:
-!help, !ping, !status, !containers, !uptime, !ip, !restart, !stop, !start, !logs`;
-
-const knownPrefixCommands = new Set([
-  '!help',
-  '!ping',
-  '!status',
-  '!containers',
-  '!uptime',
-  '!ip',
-  '!restart',
-  '!stop',
-  '!start',
-  '!logs',
-]);
-const unknownCommandCooldowns = new Map();
+/logs <container> [lines] — Show recent Docker logs (max 50 lines)`;
 
 if (!token) {
   console.error('DISCORD_TOKEN is required to start the bot.');
@@ -66,7 +49,7 @@ ensureStateDir(stateDir);
 const docker = new Docker({ socketPath: '/var/run/docker.sock' });
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
+  intents: [GatewayIntentBits.Guilds],
 });
 
 if (shouldRegisterCommands) {
@@ -189,135 +172,6 @@ client.on(Events.InteractionCreate, async (interaction) => {
   }
 });
 
-client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
-  if (allowedChannelId && message.channel.id !== allowedChannelId) return;
-  if (allowedUserId && message.author.id !== allowedUserId) return;
-
-  const [command, ...args] = message.content.trim().split(/\s+/);
-
-  if (!knownPrefixCommands.has(command)) {
-    if (command.startsWith('!')) {
-      await maybeSendUnknownCommandHint(message);
-    }
-    return;
-  }
-
-  switch (command) {
-    case '!ping': {
-      await message.reply('Hello there! 👋');
-      break;
-    }
-    case '!status': {
-      const statusReport = await buildStatusReport();
-      const statusMessage = statusReport?.report;
-      if (!statusMessage) {
-        await message.reply('Unable to read container status right now.');
-        return;
-      }
-      await message.reply(statusMessage);
-      if (statusReport?.externalIpChanged) {
-        await sendExternalIpChangeAlert(client, statusReport.lastExternalIp, statusReport.externalIp);
-      }
-      break;
-    }
-    case '!help': {
-      await message.reply(HELP_TEXT);
-      break;
-    }
-    case '!containers': {
-      try {
-        const containers = await listRunningContainersWithUptime();
-        if (containers.length === 0) {
-          await message.reply('No running containers found.');
-          return;
-        }
-        const containerList = containers.map((container) => container.name).join('\n');
-        await message.reply(containerList);
-      } catch (error) {
-        console.error('Failed to list running containers.', error);
-        await message.reply('Unable to list running containers right now.');
-      }
-      break;
-    }
-    case '!uptime': {
-      try {
-        const hostUptime = formatDuration(os.uptime() * 1000);
-        const containers = await listRunningContainersWithUptime();
-        const response = `Host uptime: ${hostUptime}\nRunning containers: ${containers.length}`;
-        await message.reply(response);
-      } catch (error) {
-        console.error('Failed to read uptime.', error);
-        await message.reply('Unable to read uptime right now.');
-      }
-      break;
-    }
-    case '!ip': {
-      try {
-        const gatewayIp = getGatewayIpAddress();
-        await message.reply(`Host IP: ${gatewayIp}`);
-      } catch (error) {
-        console.error('Failed to read host IP.', error);
-        await message.reply('Unable to read host IP right now.');
-      }
-      break;
-    }
-    case '!restart': {
-      const target = args[0];
-      if (!target) {
-        await message.reply('Usage: !restart <container-name>');
-        return;
-      }
-      const result = await restartContainer(target);
-      await message.reply(result);
-      break;
-    }
-    case '!stop': {
-      const target = args[0];
-      if (!target) {
-        await message.reply('Usage: !stop <container-name>');
-        return;
-      }
-      const result = await stopContainer(target);
-      await message.reply(result);
-      break;
-    }
-    case '!start': {
-      const target = args[0];
-      if (!target) {
-        await message.reply('Usage: !start <container-name>');
-        return;
-      }
-      const result = await startContainer(target);
-      await message.reply(result);
-      break;
-    }
-    case '!logs': {
-      const target = args[0];
-      if (!target) {
-        await message.reply('Usage: !logs <container-name> [lines]');
-        return;
-      }
-      const result = await getContainerLogs(target, args[1]);
-      await message.reply(result);
-      break;
-    }
-    default: {
-      // Ignore unknown commands for now.
-    }
-  }
-});
-
-async function maybeSendUnknownCommandHint(message) {
-  const now = Date.now();
-  const lastSent = unknownCommandCooldowns.get(message.author.id) ?? 0;
-  if (now - lastSent < 30_000) {
-    return;
-  }
-  unknownCommandCooldowns.set(message.author.id, now);
-  await message.reply('I use slash commands now — type `/help` to see commands.');
-}
-
 async function buildStatusReport() {
   try {
     const gatewayIp = getGatewayIpAddress();
@@ -345,7 +199,7 @@ async function buildStatusReport() {
 
 async function restartContainer(containerName) {
   if (!containerName) {
-    return 'Usage: !restart <container-name>';
+    return 'Usage: /restart <container-name>';
   }
   try {
     const container = docker.getContainer(containerName);
@@ -359,7 +213,7 @@ async function restartContainer(containerName) {
 
 async function stopContainer(containerName) {
   if (!containerName) {
-    return 'Usage: !stop <container-name>';
+    return 'Usage: /stop <container-name>';
   }
   try {
     const container = docker.getContainer(containerName);
@@ -378,7 +232,7 @@ async function stopContainer(containerName) {
 
 async function startContainer(containerName) {
   if (!containerName) {
-    return 'Usage: !start <container-name>';
+    return 'Usage: /start <container-name>';
   }
   try {
     const container = docker.getContainer(containerName);

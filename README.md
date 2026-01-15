@@ -5,7 +5,6 @@ A Discord bot that reports homelab status, including Docker container uptime, an
 ## What it does
 
 - Responds to slash commands like `/status`, `/containers`, `/uptime`, and `/restart`.
-- Keeps legacy `!` prefix commands working during the transition.
 - Reports running Docker containers and their uptime.
 - Sends a scheduled daily status report at 8am (America/New_York).
 - Includes external (public) IP in every status report and alerts when it changes.
