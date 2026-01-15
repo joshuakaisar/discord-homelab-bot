@@ -22,7 +22,9 @@ const HELP_TEXT = `Available commands:
 !containers — List running containers
 !uptime — Show host + container uptime
 !ip — Show current homelab IP
-!restart <container-name> — Restart a Docker container by name`;
+!restart <container-name> — Restart a Docker container by name
+!stop <container-name> — Stop a Docker container by name
+!start <container-name> — Start a Docker container by name`;
 
 if (!token) {
   console.error('DISCORD_TOKEN is required to start the bot.');
@@ -118,6 +120,26 @@ client.on('messageCreate', async (message) => {
       await message.reply(result);
       break;
     }
+    case '!stop': {
+      const target = args[0];
+      if (!target) {
+        await message.reply('Usage: !stop <container-name>');
+        return;
+      }
+      const result = await stopContainer(target);
+      await message.reply(result);
+      break;
+    }
+    case '!start': {
+      const target = args[0];
+      if (!target) {
+        await message.reply('Usage: !start <container-name>');
+        return;
+      }
+      const result = await startContainer(target);
+      await message.reply(result);
+      break;
+    }
     default: {
       // Ignore unknown commands for now.
     }
@@ -160,6 +182,44 @@ async function restartContainer(containerName) {
   } catch (error) {
     console.error(`Failed to restart container ${containerName}.`, error);
     return `Unable to restart ${containerName} right now.`;
+  }
+}
+
+async function stopContainer(containerName) {
+  if (!containerName) {
+    return 'Usage: !stop <container-name>';
+  }
+  try {
+    const container = docker.getContainer(containerName);
+    const details = await container.inspect();
+    const isRunning = Boolean(details?.State?.Running);
+    if (!isRunning) {
+      return `${containerName} is already stopped.`;
+    }
+    await container.stop();
+    return `Stopped ${containerName}.`;
+  } catch (error) {
+    console.error(`Failed to stop container ${containerName}.`, error);
+    return `Unable to stop ${containerName} right now.`;
+  }
+}
+
+async function startContainer(containerName) {
+  if (!containerName) {
+    return 'Usage: !start <container-name>';
+  }
+  try {
+    const container = docker.getContainer(containerName);
+    const details = await container.inspect();
+    const isRunning = Boolean(details?.State?.Running);
+    if (isRunning) {
+      return `${containerName} is already running.`;
+    }
+    await container.start();
+    return `Started ${containerName}.`;
+  } catch (error) {
+    console.error(`Failed to start container ${containerName}.`, error);
+    return `Unable to start ${containerName} right now.`;
   }
 }
 
