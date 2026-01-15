@@ -4,28 +4,57 @@ import cron from 'node-cron';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { registerCommands } from './register-commands.js';
 
 // Discord bot for the homelab. Real implementations for Docker
 // interactions and command responses should be added later.
 
+// Environment variables:
+// DISCORD_TOKEN (required)
+// DISCORD_CLIENT_ID (required for slash command registration)
+// DISCORD_GUILD_ID (required for guild-scoped registration)
+// DISCORD_REGISTER_GLOBAL (optional, set to 'true' for global registration)
+// DISCORD_REGISTER_COMMANDS (optional, defaults to true)
+// DISCORD_ALLOWED_CHANNEL_ID (optional)
+// DISCORD_ALLOWED_USER_ID (optional)
+// DISCORD_REPORT_CHANNEL_ID (optional)
+// BOT_STATE_DIR (optional)
 const token = process.env.DISCORD_TOKEN;
 const allowedChannelId = process.env.DISCORD_ALLOWED_CHANNEL_ID;
 const allowedUserId = process.env.DISCORD_ALLOWED_USER_ID;
 const reportChannelId = process.env.DISCORD_REPORT_CHANNEL_ID;
 const stateDir = process.env.BOT_STATE_DIR || path.join(process.cwd(), 'data');
 const lastExternalIpPath = path.join(stateDir, 'last_external_ip.txt');
+const shouldRegisterCommands = process.env.DISCORD_REGISTER_COMMANDS !== 'false';
 
 const HELP_TEXT = `Available commands:
-!help — Show this help message
-!ping — Test bot responsiveness
-!status — Show homelab status
-!containers — List running containers
-!uptime — Show host + container uptime
-!ip — Show current homelab IP
-!restart <container-name> — Restart a Docker container by name
-!stop <container-name> — Stop a Docker container by name
-!start <container-name> — Start a Docker container by name
-!logs <container-name> [lines] — Show recent Docker logs`;
+/help — Show this help message
+/ping — Test bot responsiveness
+/status — Show homelab status
+/containers — List running containers
+/uptime — Show host + container uptime
+/ip — Show current homelab IP
+/restart <container> — Restart a Docker container by name
+/stop <container> — Stop a Docker container by name
+/start <container> — Start a Docker container by name
+/logs <container> [lines] — Show recent Docker logs (max 50 lines)
+
+Legacy prefixes still work for now:
+!help, !ping, !status, !containers, !uptime, !ip, !restart, !stop, !start, !logs`;
+
+const knownPrefixCommands = new Set([
+  '!help',
+  '!ping',
+  '!status',
+  '!containers',
+  '!uptime',
+  '!ip',
+  '!restart',
+  '!stop',
+  '!start',
+  '!logs',
+]);
+const unknownCommandCooldowns = new Map();
 
 if (!token) {
   console.error('DISCORD_TOKEN is required to start the bot.');
@@ -40,9 +69,124 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent],
 });
 
+if (shouldRegisterCommands) {
+  registerCommands()
+    .then(({ count, scope }) => {
+      console.log(`Registered ${count} slash commands (${scope}).`);
+    })
+    .catch((error) => {
+      console.error('Failed to register slash commands.', error);
+    });
+}
+
 client.once(Events.ClientReady, () => {
   console.log(`Discord bot logged in as ${client.user?.tag ?? 'unknown user'}`);
   scheduleDailyReport(client);
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+  if (allowedChannelId && interaction.channelId !== allowedChannelId) return;
+  if (allowedUserId && interaction.user.id !== allowedUserId) return;
+
+  switch (interaction.commandName) {
+    case 'help': {
+      await interaction.reply(HELP_TEXT);
+      break;
+    }
+    case 'ping': {
+      await interaction.reply('Hello there! 👋');
+      break;
+    }
+    case 'status': {
+      await interaction.deferReply({ ephemeral: false });
+      const statusReport = await buildStatusReport();
+      const statusMessage = statusReport?.report;
+      if (!statusMessage) {
+        await interaction.editReply('Unable to read container status right now.');
+        return;
+      }
+      await interaction.editReply(statusMessage);
+      if (statusReport?.externalIpChanged) {
+        await sendExternalIpChangeAlert(client, statusReport.lastExternalIp, statusReport.externalIp);
+      }
+      break;
+    }
+    case 'containers': {
+      await interaction.deferReply({ ephemeral: false });
+      try {
+        const containers = await listRunningContainersWithUptime();
+        if (containers.length === 0) {
+          await interaction.editReply('No running containers found.');
+          return;
+        }
+        const containerList = containers.map((container) => container.name).join('\n');
+        await interaction.editReply(containerList);
+      } catch (error) {
+        console.error('Failed to list running containers.', error);
+        await interaction.editReply('Unable to list running containers right now.');
+      }
+      break;
+    }
+    case 'uptime': {
+      try {
+        const hostUptime = formatDuration(os.uptime() * 1000);
+        const containers = await listRunningContainersWithUptime();
+        const containerLines =
+          containers.length === 0
+            ? ['(no running containers)']
+            : containers.map((container) => `${container.name} — ${container.uptime}`);
+        const response = `Host uptime: ${hostUptime}\nRunning containers:\n${containerLines.join('\n')}`;
+        await interaction.reply(response);
+      } catch (error) {
+        console.error('Failed to read uptime.', error);
+        await interaction.reply('Unable to read uptime right now.');
+      }
+      break;
+    }
+    case 'ip': {
+      try {
+        const gatewayIp = getGatewayIpAddress();
+        await interaction.reply(`Host IP: ${gatewayIp}`);
+      } catch (error) {
+        console.error('Failed to read host IP.', error);
+        await interaction.reply('Unable to read host IP right now.');
+      }
+      break;
+    }
+    case 'restart': {
+      await interaction.deferReply({ ephemeral: false });
+      const target = interaction.options.getString('container', true);
+      const result = await restartContainer(target);
+      await interaction.editReply(result);
+      break;
+    }
+    case 'stop': {
+      await interaction.deferReply({ ephemeral: false });
+      const target = interaction.options.getString('container', true);
+      const result = await stopContainer(target);
+      await interaction.editReply(result);
+      break;
+    }
+    case 'start': {
+      await interaction.deferReply({ ephemeral: false });
+      const target = interaction.options.getString('container', true);
+      const result = await startContainer(target);
+      await interaction.editReply(result);
+      break;
+    }
+    case 'logs': {
+      await interaction.deferReply({ ephemeral: false });
+      const target = interaction.options.getString('container', true);
+      const lines = interaction.options.getInteger('lines');
+      const result = await getContainerLogs(target, lines);
+      await interaction.editReply(result);
+      break;
+    }
+    default: {
+      await interaction.reply('Unknown command.');
+    }
+  }
 });
 
 client.on('messageCreate', async (message) => {
@@ -51,6 +195,13 @@ client.on('messageCreate', async (message) => {
   if (allowedUserId && message.author.id !== allowedUserId) return;
 
   const [command, ...args] = message.content.trim().split(/\s+/);
+
+  if (!knownPrefixCommands.has(command)) {
+    if (command.startsWith('!')) {
+      await maybeSendUnknownCommandHint(message);
+    }
+    return;
+  }
 
   switch (command) {
     case '!ping': {
@@ -156,6 +307,16 @@ client.on('messageCreate', async (message) => {
     }
   }
 });
+
+async function maybeSendUnknownCommandHint(message) {
+  const now = Date.now();
+  const lastSent = unknownCommandCooldowns.get(message.author.id) ?? 0;
+  if (now - lastSent < 30_000) {
+    return;
+  }
+  unknownCommandCooldowns.set(message.author.id, now);
+  await message.reply('I use slash commands now — type `/help` to see commands.');
+}
 
 async function buildStatusReport() {
   try {

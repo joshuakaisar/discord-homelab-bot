@@ -5,6 +5,10 @@ services:
     restart: unless-stopped
     environment:
       - DISCORD_TOKEN
+      - DISCORD_CLIENT_ID
+      - DISCORD_GUILD_ID
+      - DISCORD_REGISTER_GLOBAL=false
+      - DISCORD_REGISTER_COMMANDS=true
       - DISCORD_ALLOWED_CHANNEL_ID
       - DISCORD_ALLOWED_USER_ID
       - DISCORD_REPORT_CHANNEL_ID
